@@ -253,117 +253,68 @@ class Speedtest(object):
         """
         headers = {}
         if gzip:
-            headers['Accept-Encoding'] = 'gzip'[cite: 107]
+            headers['Accept-Encoding'] = 'gzip'
 
         request = build_request('://www.speedtest.net/speedtest-config.php',
-                                headers=headers, secure=self._secure)[cite: 107]
+                                headers=headers, secure=self._secure)
 
-        uh, e = catch_request(request, opener=self._opener)[cite: 107]
+        uh, e = catch_request(request, opener=self._opener)
 
-        # FIX: Check if the response object is None (common with proxy interference)
+        # Fix for Netskope/Proxy: Check if response object exists
         if e or uh is None:
-            printer('Could not connect to speedtest.net. This may be due to '
-                    'your proxy or Netskope settings.', error=True)
-            raise ConfigRetrievalError(e or "No response from server")[cite: 108]
-
-        configxml_list = []
-        stream = get_response_stream(uh)[cite: 108]
-
-        while 1:
-            try:
-                configxml_list.append(stream.read(1024))[cite: 109]
-            except (OSError, EOFError):
-                raise ConfigRetrievalError(get_exception())[cite: 109]
-            if len(configxml_list[-1]) == 0:
-                break
-        stream.close()[cite: 109]
-        uh.close()[cite: 109]
-
-        # FIX: Safely check for the HTTP status code
-        status_code = getattr(uh, 'code', 0)
-        if int(status_code) != 200:
-            return None[cite: 109]
-
-        configxml = ''.encode().join(configxml_list)[cite: 109]
-
-        printer('Config XML:\n%s' % configxml, debug=True)[cite: 109]
+            print_('Could not connect to speedtest.net. Check proxy/Netskope settings.')
+            raise ConfigRetrievalError(e or "No response from server")
 
         try:
-            try:
-                root = ET.fromstring(configxml)[cite: 110]
-            except ET.ParseError:
-                e = get_exception()
-                raise SpeedtestConfigError(
-                    'Malformed speedtest.net configuration: %s' % e[cite: 111]
-                )
-            server_config = root.find('server-config').attrib[cite: 111]
-            download = root.find('download').attrib[cite: 111]
-            upload = root.find('upload').attrib[cite: 111]
-            client = root.find('client').attrib[cite: 111]
+            configxml = uh.read()
+            uh.close()
+        except (OSError, EOFError) as err:
+            raise ConfigRetrievalError(str(err))
 
-        except AttributeError:
-            try:
-                root = DOM.parseString(configxml)[cite: 112]
-            except ExpatError:
-                e = get_exception()
-                raise SpeedtestConfigError(
-                    'Malformed speedtest.net configuration: %s' % e[cite: 113]
-                )
-            server_config = get_attributes_by_tag_name(root, 'server-config')[cite: 113]
-            download = get_attributes_by_tag_name(root, 'download')[cite: 113]
-            upload = get_attributes_by_tag_name(root, 'upload')[cite: 113]
-            client = get_attributes_by_tag_name(root, 'client')[cite: 113]
+        # Safely check for the HTTP status code
+        status_code = getattr(uh, 'code', 0)
+        if status_code and int(status_code) != 200:
+            raise ConfigRetrievalError("HTTP Error: %s" % status_code)
+
+        try:
+            root = ET.fromstring(configxml)
+            server_config = root.find('server-config').attrib
+            download = root.find('download').attrib
+            upload = root.find('upload').attrib
+            client = root.find('client').attrib
+        except Exception as err:
+            raise SpeedtestException('Malformed configuration: %s' % err)
 
         ignore_servers = [
-            int(i) for i in server_config['ignoreids'].split(',') if i[cite: 114]
+            int(i) for i in server_config['ignoreids'].split(',') if i
         ]
 
-        ratio = int(upload['ratio'])[cite: 114]
-        upload_max = int(upload['maxchunkcount'])[cite: 114]
-        up_sizes = [32768, 65536, 131072, 262144, 524288, 1048576, 7340032][cite: 114]
+        ratio = int(upload['ratio'])
+        upload_max = int(upload['maxchunkcount'])
+        up_sizes = [32768, 65536, 131072, 262144, 524288, 1048576, 7340032]
         sizes = {
-            'upload': up_sizes[ratio - 1:], [cite: 114]
-        'download': [350, 500, 750, 1000, 1500, 2000, 2500,
-                     3000, 3500, 4000][cite: 115]
+            'upload': up_sizes[ratio - 1:],
+            'download': [350, 500, 750, 1000, 1500, 2000, 2500, 3000, 3500, 4000]
         }
 
-        size_count = len(sizes['upload'])[cite: 115]
-        upload_count = int(math.ceil(upload_max / size_count))[cite: 115]
+        size_count = len(sizes['upload'])
+        upload_count = int(math.ceil(upload_max / size_count))
 
-        counts = {
-            'upload': upload_count, [cite: 115]
-        'download': int(download['threadsperurl'])[cite: 116]
-        }
-
-        threads = {
-            'upload': int(upload['threads']), [cite: 116]
-        'download': int(server_config['threadcount']) * 2[cite: 116]
-        }
-
-        length = {
-            'upload': int(upload['testlength']), [cite: 116]
-        'download': int(download['testlength'])[cite: 116]
-        }
-
+        # We force the test length to 20 seconds for accuracy as requested
         self.config.update({
-            'client': client, [cite: 117]
-        'ignore_servers': ignore_servers, [cite: 117]
-        'sizes': sizes, [cite: 117]
-        'counts': counts, [cite: 117]
-        'threads': threads, [cite: 117]
-        'length': length, [cite: 117]
-        'upload_max': upload_count * size_count[cite: 118]
+            'client': client,
+            'ignore_servers': ignore_servers,
+            'sizes': sizes,
+            'counts': {'upload': upload_count, 'download': int(download['threadsperurl'])},
+            'threads': {'upload': int(upload['threads']), 'download': int(server_config['threadcount']) * 2},
+            'length': {'upload': 20, 'download': 20},
+            'upload_max': upload_count * size_count
         })
 
         try:
-            self.lat_lon = (float(client['lat']), float(client['lon']))[cite: 118]
-        except ValueError:
-            raise SpeedtestConfigError(
-                'Unknown location: lat=%r lon=%r' %
-                (client.get('lat'), client.get('lon'))[cite: 118]
-            )
-
-        printer('Config:\n%r' % self.config, debug=True)[cite: 119]
+            self.lat_lon = (float(client['lat']), float(client['lon']))
+        except (ValueError, KeyError):
+            raise SpeedtestException('Unknown location in config.')
 
         return self.config
 
