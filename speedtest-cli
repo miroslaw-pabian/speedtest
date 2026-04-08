@@ -16,26 +16,12 @@ import timeit
 import subprocess
 import xml.parsers.expat
 
+# Import compatibility blocks [cite: 1-6]
 try:
     import gzip
-
-    GZIP_BASE = gzip.GzipFile
 except ImportError:
     gzip = None
-    GZIP_BASE = object
 
-__version__ = '2.2.0-sustained'
-
-
-class FakeShutdownEvent(object):
-    @staticmethod
-    def isSet():
-        return False
-
-    is_set = isSet
-
-
-# --- Restored Original Import Compatibility Block ---
 try:
     import xml.etree.ElementTree as ET
 except ImportError:
@@ -54,7 +40,7 @@ except ImportError:
     from optparse import OptionParser as ArgParser
 
 
-# Helper for UTF-8 printing
+# Helper for printing
 def print_(*args, **kwargs):
     fp = kwargs.pop("file", sys.stdout)
     if fp is None: return
@@ -63,7 +49,7 @@ def print_(*args, **kwargs):
     fp.flush()
 
 
-# --- Connection Helpers ---
+# Distance calculation [cite: 7]
 def distance(origin, destination):
     lat1, lon1 = origin
     lat2, lon2 = destination
@@ -76,7 +62,7 @@ def distance(origin, destination):
 
 
 def build_user_agent():
-    return 'Mozilla/5.0 (speedtest-cli/%s) Python/%s' % (__version__, platform.python_version())
+    return 'Mozilla/5.0 (speedtest-cli/2.2.0-custom) Python/%s' % platform.python_version()
 
 
 def build_request(url, data=None, headers=None, secure=False):
@@ -86,16 +72,7 @@ def build_request(url, data=None, headers=None, secure=False):
     return Request(url, data=data, headers=headers)
 
 
-def catch_request(request, opener=None):
-    _open = opener.open if opener else urlopen
-    try:
-        uh = _open(request)
-        return uh, False
-    except Exception as e:
-        return None, e
-
-
-# --- Sustained Single Connection Logic ---
+# Sustained Single Connection Downloader
 class SustainedDownloader(threading.Thread):
     def __init__(self, request, timeout, opener):
         threading.Thread.__init__(self)
@@ -109,7 +86,7 @@ class SustainedDownloader(threading.Thread):
         try:
             f = self._opener.open(self.request)
             while (timeit.default_timer() - start_time) < self.timeout:
-                chunk = f.read(131072)  # 128KB chunks for high-speed stability
+                chunk = f.read(131072)  # 128KB chunks for efficiency
                 if not chunk: break
                 self.result.append(len(chunk))
             f.close()
@@ -143,51 +120,50 @@ class Speedtest(object):
     def __init__(self, secure=False):
         self.config = {}
         self._secure = secure
-        # Fixed Opener: Using _build_opener() ensures HTTP/HTTPS handlers are present
         self._opener = _build_opener()
         self._opener.addheaders = [('User-agent', build_user_agent())]
         self.get_config()
         self.results = SpeedtestResults(client=self.config['client'])
 
     def get_config(self):
+        # Fetching config [cite: 16-23]
         headers = {'Accept-Encoding': 'gzip'} if gzip else {}
         req = build_request('://www.speedtest.net/speedtest-config.php', headers=headers, secure=self._secure)
-        uh, e = catch_request(req, opener=self._opener)
-
-        if e or uh is None:
-            raise ConfigRetrievalError("Failed to get config. Check connectivity.")
-
         try:
+            uh = self._opener.open(req)
             configxml = uh.read()
             uh.close()
             root = ET.fromstring(configxml)
             self.config = {
                 'client': root.find('client').attrib,
-                'length': {'download': 20, 'upload': 20}  # Default 20s
+                'length': {'download': 20, 'upload': 20}  # Default 20s duration
             }
             self.lat_lon = (float(self.config['client']['lat']), float(self.config['client']['lon']))
-        except Exception as err:
-            raise ConfigRetrievalError("Config Error: %s" % err)
-        return self.config
+        except Exception as e:
+            print_("Config Error: %s" % e)
+            sys.exit(1)
 
     def get_servers(self, server_id=None):
+        # GitHub Gist Source [cite: 24-25]
         url = 'https://gist.githubusercontent.com/stas-sl/eecfbf3ba2497d1171dcb28cc0fb73ee/raw/'
         req = build_request(url, secure=self._secure)
-        uh, e = catch_request(req, opener=self._opener)
-        if e: raise ServersRetrievalError("Gist server list unavailable.")
-
-        csv_data = uh.read().decode('utf-8')
-        reader = csv.reader(csv_data.splitlines())
-        next(reader, None)
-
-        all_servers = []
-        for row in reader:
-            if not row or len(row) < 10 or row[0].lower() == 'id': continue
-            all_servers.append({
-                'id': row[0].strip(), 'url': row[1].strip(), 'lat': row[2].strip(),
-                'lon': row[3].strip(), 'name': row[4].strip(), 'country': row[5].strip(),
-                'sponsor': row[7].strip(), 'host': row[9].strip()
-            })
+        try:
+            uh = self._opener.open(req)
+            csv_data = uh.read().decode('utf-8')
+            uh.close()
+            reader = csv.reader(csv_data.splitlines())
+            next(reader, None)
+            all_servers = []
+            for row in reader:
+                if not row or len(row) < 10 or row[0].lower() == 'id': continue
+                all_servers.append({
+                    'id': row[0].strip(), 'url': row[1].strip(), 'lat': row[2].strip(),
+                    'lon': row[3].strip(), 'name': row[4].strip(), 'country': row[5].strip(),
+                    'sponsor': row[7].strip(), 'host': row[9].strip()
+                })
+        except Exception as e:
+            print_("Server list error: %s" % e)
+            sys.exit(1)
 
         chosen = None
         if server_id:
@@ -212,6 +188,7 @@ class Speedtest(object):
         return chosen
 
     def download(self):
+        # Sustained single large file download
         url = os.path.dirname(self._best['url']) + '/random4000x4000.jpg'
         thread = SustainedDownloader(build_request(url), self.config['length']['download'], self._opener)
         start = timeit.default_timer()
@@ -249,4 +226,41 @@ class Speedtest(object):
 
 class SpeedtestResults(object):
     def __init__(self, server=None, client=None):
-        self.download = self.upload =
+        self.download = self.upload = 0  # FIXED syntax error here
+        self.server = server or {}
+        self.client = client or {}
+        self.bytes_received = self.bytes_sent = 0
+
+
+def shell():
+    parser = ArgParser()
+    try:
+        parser.add_argument('--server', type=int, action='append')
+        parser.add_argument('--secure', action='store_true')
+        args = parser.parse_args()
+    except (AttributeError, TypeError):
+        parser.add_option('--server', dest='server', type='int', action='append')
+        parser.add_option('--secure', dest='secure', action='store_true')
+        (args, _) = parser.parse_args()
+
+    print_('Initializing sustained speed test...')
+    st = Speedtest(secure=args.secure)
+    best = st.get_servers(server_id=args.server)
+
+    st.start_mtr()
+    print_('\nHosted by %s [%.2f km]: %s' % (best['sponsor'], best['d'], best['name']))
+
+    print_('Testing download speed (20s sustained, single connection)...')
+    st.download()
+    print_('Download: %.2f Mbit/s' % (st.results.download / 1e6))
+
+    print_('Testing upload speed (20s sustained, single connection)...')
+    st.upload()
+    print_('Upload: %.2f Mbit/s' % (st.results.upload / 1e6))
+
+    print_('\nWaiting for MTR report...')
+    print_('--- MTR Report ---\n%s' % st.get_mtr_report())
+
+
+if __name__ == '__main__':
+    shell()
