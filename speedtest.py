@@ -77,12 +77,37 @@ class Speedtest:
         print(divider + "\n")
 
     def get_latency(self, url):
-        """Measures latency to the host using a small request."""
+        """Measures average network latency using MTR on TCP port 8080."""
+        if not shutil.which("mtr"):
+            return 0
         try:
-            start = time.time()
-            self.session.head(url, timeout=5)
-            return (time.time() - start) * 1000
-        except Exception:
+            # Extract hostname from the URL
+            host = urlparse(url).hostname
+
+            # Run MTR in report mode (-r) for 5 cycles (-c 5)
+            # using TCP (-T) on port 8080 (-P 8080)
+            result = subprocess.run(
+                ["mtr", "-r", "-c", "5", "-T", "-P", "8080", host],
+                capture_output=True,
+                text=True,
+                timeout=20
+            )
+
+            lines = result.stdout.strip().splitlines()
+            if not lines:
+                return 0
+
+            # The last line of the report contains the statistics for the destination hop
+            # The standard MTR report format is:
+            # HOST: host  Loss%  Snt  Last  Avg  Best  Wrst  StDev
+            stats = lines[-1].split()
+
+            # The 'Avg' value is typically at index 5 in the split report line
+            # (Index 0: Hop number/Pipe, Index 1: Host, Index 2: Loss, Index 3: Snt, Index 4: Last, Index 5: Avg)
+            avg_latency = float(stats[5])
+            return avg_latency
+
+        except (subprocess.TimeoutExpired, ValueError, IndexError, Exception):
             return 0
 
     def run_mtr(self, host):
