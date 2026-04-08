@@ -184,4 +184,21 @@ class Speedtest:
         else:
             print("Usage: speedtest speedtest -s [ID] or -l [Country]")
 
+def main():
+    parser = argparse.ArgumentParser(description="speedtest using ookla servers")
+    parser.add_argument("-p", "--pops", help="Comma separated list of pops")
+    parser.add_argument("-s", "--server", help="Specific server ID")
+    parser.add_argument("-l", "--listservers", nargs='?', const='ALL', help="Find server IDs")
+    parser.set_defaults(handler=Speedtest)
+    args = parser.parse_args()
 
+    if hasattr(args, 'handler'):
+        tester = args.handler()
+        tester.run(args)
+    elif args.command == 'version':
+        print("Speedtest CLI v2.7")
+    else:
+        parser.print_help()
+
+if __name__ == '__main__':
+    main()
