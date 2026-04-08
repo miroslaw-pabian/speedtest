@@ -24,7 +24,7 @@ except ImportError:
     gzip = None
     GZIP_BASE = object
 
-__version__ = '2.2.0-custom'
+__version__ = '2.2.0-sustained'
 
 
 class FakeShutdownEvent(object):
@@ -35,83 +35,18 @@ class FakeShutdownEvent(object):
     is_set = isSet
 
 
-DEBUG = False
-_GLOBAL_DEFAULT_TIMEOUT = object()
-
 # Imports for compatibility
 try:
-    import json
-except ImportError:
-    try:
-        import simplejson as json
-    except ImportError:
-        json = None
-
-try:
     import xml.etree.ElementTree as ET
-
-    try:
-        from xml.etree.ElementTree import _Element as ET_Element
-    except ImportError:
-        pass
 except ImportError:
     from xml.dom import minidom as DOM
-    from xml.parsers.expat import ExpatError
 
     ET = None
 
 try:
-    from urllib2 import (urlopen, Request, HTTPError, URLError,
-                         AbstractHTTPHandler, ProxyHandler,
-                         HTTPDefaultErrorHandler, HTTPRedirectHandler,
-                         HTTPErrorProcessor, OpenerDirector)
+    from urllib.request import urlopen, Request, build_opener as _build_opener
 except ImportError:
-    from urllib.request import (urlopen, Request, HTTPError, URLError,
-                                AbstractHTTPHandler, ProxyHandler,
-                                HTTPDefaultErrorHandler, HTTPRedirectHandler,
-                                HTTPErrorProcessor, OpenerDirector)
-
-try:
-    from httplib import HTTPConnection, BadStatusLine, HTTPSConnection
-except ImportError:
-    from http.client import HTTPConnection, BadStatusLine, HTTPSConnection
-
-try:
-    from Queue import Queue
-except ImportError:
-    from queue import Queue
-
-try:
-    from urlparse import urlparse, parse_qs
-except ImportError:
-    from urllib.parse import urlparse, parse_qs
-
-try:
-    from hashlib import md5
-except ImportError:
-    from md5 import md5
-
-try:
-    from argparse import ArgumentParser as ArgParser
-    from argparse import SUPPRESS as ARG_SUPPRESS
-
-    PARSER_TYPE_INT = int
-    PARSER_TYPE_STR = str
-    PARSER_TYPE_FLOAT = float
-except ImportError:
-    from optparse import OptionParser as ArgParser
-    from optparse import SUPPRESS_HELP as ARG_SUPPRESS
-
-    PARSER_TYPE_INT = 'int'
-    PARSER_TYPE_STR = 'string'
-    PARSER_TYPE_FLOAT = 'float'
-
-try:
-    from io import StringIO, BytesIO
-except ImportError:
-    from cStringIO import StringIO
-
-    BytesIO = None
+    from urllib2 import urlopen, Request, build_opener as _build_opener
 
 
 # Helper for UTF-8 printing
@@ -123,30 +58,14 @@ def print_(*args, **kwargs):
     fp.flush()
 
 
-def to_utf8(v):
-    return v
-
-
 # --- Core Exceptions ---
 class SpeedtestException(Exception): pass
 
 
-class SpeedtestCLIError(SpeedtestException): pass
+class ConfigRetrievalError(SpeedtestException): pass
 
 
-class SpeedtestHTTPError(SpeedtestException): pass
-
-
-class ConfigRetrievalError(SpeedtestHTTPError): pass
-
-
-class ServersRetrievalError(SpeedtestHTTPError): pass
-
-
-class SpeedtestServersError(SpeedtestException): pass
-
-
-class SpeedtestUploadTimeout(SpeedtestException): pass
+class ServersRetrievalError(SpeedtestException): pass
 
 
 # --- Connection Helpers ---
@@ -181,24 +100,21 @@ def catch_request(request, opener=None):
         return None, e
 
 
-# --- Enhanced Downloader for Sustained Single Connection ---
+# --- Sustained Single Connection Downloader ---
 class SustainedDownloader(threading.Thread):
-    def __init__(self, request, timeout, opener=None, shutdown_event=None):
+    def __init__(self, request, timeout, opener=None):
         threading.Thread.__init__(self)
         self.request = request
         self.timeout = timeout
-        self.result = [0]
-        self._opener = opener.open if opener else urlopen
-        self._shutdown_event = shutdown_event or FakeShutdownEvent()
+        self.result = []
+        self._opener = opener or _build_opener()
 
     def run(self):
         start_time = timeit.default_timer()
         try:
-            f = self._opener(self.request)
-            while not self._shutdown_event.is_set():
-                if (timeit.default_timer() - start_time) >= self.timeout:
-                    break
-                chunk = f.read(65536)  # Larger chunks for high speed
+            f = self._opener.open(self.request)
+            while (timeit.default_timer() - start_time) < self.timeout:
+                chunk = f.read(131072)  # 128KB chunks for high speed stability
                 if not chunk:
                     break
                 self.result.append(len(chunk))
@@ -208,121 +124,63 @@ class SustainedDownloader(threading.Thread):
 
 
 class SustainedUploader(threading.Thread):
-    def __init__(self, url, timeout, opener=None, shutdown_event=None):
+    def __init__(self, url, timeout, opener=None):
         threading.Thread.__init__(self)
         self.url = url
         self.timeout = timeout
-        self.result = 0
-        self.total_sent = [0]
-        self._opener = opener.open if opener else urlopen
-        self._shutdown_event = shutdown_event or FakeShutdownEvent()
+        self.total_sent = 0
+        self._opener = opener or _build_opener()
 
     def run(self):
         start_time = timeit.default_timer()
-        # Create a large data block to reuse
         data_block = b'0' * 1048576  # 1MB block
         try:
-            while not self._shutdown_event.is_set():
-                if (timeit.default_timer() - start_time) >= self.timeout:
-                    break
-                # Perform a sustained POST
+            while (timeit.default_timer() - start_time) < self.timeout:
                 req = build_request(self.url, data=data_block)
-                f = self._opener(req)
+                f = self._opener.open(req)
                 f.read(11)
                 f.close()
-                self.total_sent.append(len(data_block))
-            self.result = sum(self.total_sent)
+                self.total_sent += len(data_block)
         except Exception:
-            self.result = sum(self.total_sent)
+            pass
 
 
 # --- Main Speedtest Class ---
 class Speedtest(object):
-    def __init__(self, source_address=None, timeout=10, secure=False):
+    def __init__(self, secure=False):
         self.config = {}
-        self.servers = {}
         self._secure = secure
-        self._timeout = timeout
-        self._opener = build_opener()
+        self._opener = _build_opener()
+        self._opener.addheaders = [('User-agent', build_user_agent())]
         self.get_config()
-        self.results = SpeedtestResults(client=self.config['client'], secure=secure)
+        self.results = SpeedtestResults(client=self.config['client'])
 
     def get_config(self):
-        """Download the speedtest.net configuration and return only the data
-        we are interested in
-        """
-        headers = {}
-        if gzip:
-            headers['Accept-Encoding'] = 'gzip'
+        headers = {'Accept-Encoding': 'gzip'} if gzip else {}
+        req = build_request('://www.speedtest.net/speedtest-config.php', headers=headers, secure=self._secure)
 
-        request = build_request('://www.speedtest.net/speedtest-config.php',
-                                headers=headers, secure=self._secure)
-
-        uh, e = catch_request(request, opener=self._opener)
-
-        # Fix for Netskope/Proxy: Check if response object exists
+        uh, e = catch_request(req, opener=self._opener)
         if e or uh is None:
-            print_('Could not connect to speedtest.net. Check proxy/Netskope settings.')
-            raise ConfigRetrievalError(e or "No response from server")
+            raise ConfigRetrievalError("Network connection failed: %s" % e)
 
         try:
             configxml = uh.read()
             uh.close()
-        except (OSError, EOFError) as err:
-            raise ConfigRetrievalError(str(err))
-
-        # Safely check for the HTTP status code
-        status_code = getattr(uh, 'code', 0)
-        if status_code and int(status_code) != 200:
-            raise ConfigRetrievalError("HTTP Error: %s" % status_code)
-
-        try:
             root = ET.fromstring(configxml)
-            server_config = root.find('server-config').attrib
-            download = root.find('download').attrib
-            upload = root.find('upload').attrib
-            client = root.find('client').attrib
+            self.config = {
+                'client': root.find('client').attrib,
+                'length': {'download': 20, 'upload': 20}  # Default 20s as requested
+            }
+            self.lat_lon = (float(self.config['client']['lat']), float(self.config['client']['lon']))
         except Exception as err:
-            raise SpeedtestException('Malformed configuration: %s' % err)
-
-        ignore_servers = [
-            int(i) for i in server_config['ignoreids'].split(',') if i
-        ]
-
-        ratio = int(upload['ratio'])
-        upload_max = int(upload['maxchunkcount'])
-        up_sizes = [32768, 65536, 131072, 262144, 524288, 1048576, 7340032]
-        sizes = {
-            'upload': up_sizes[ratio - 1:],
-            'download': [350, 500, 750, 1000, 1500, 2000, 2500, 3000, 3500, 4000]
-        }
-
-        size_count = len(sizes['upload'])
-        upload_count = int(math.ceil(upload_max / size_count))
-
-        # We force the test length to 20 seconds for accuracy as requested
-        self.config.update({
-            'client': client,
-            'ignore_servers': ignore_servers,
-            'sizes': sizes,
-            'counts': {'upload': upload_count, 'download': int(download['threadsperurl'])},
-            'threads': {'upload': int(upload['threads']), 'download': int(server_config['threadcount']) * 2},
-            'length': {'upload': 20, 'download': 20},
-            'upload_max': upload_count * size_count
-        })
-
-        try:
-            self.lat_lon = (float(client['lat']), float(client['lon']))
-        except (ValueError, KeyError):
-            raise SpeedtestException('Unknown location in config.')
-
+            raise ConfigRetrievalError("Failed to parse configuration: %s" % err)
         return self.config
 
-    def get_servers(self, servers=None):
+    def get_servers(self, server_id=None):
         url = 'https://gist.githubusercontent.com/stas-sl/eecfbf3ba2497d1171dcb28cc0fb73ee/raw/'
         req = build_request(url, secure=self._secure)
         uh, e = catch_request(req, opener=self._opener)
-        if e: raise ServersRetrievalError()
+        if e: raise ServersRetrievalError("Failed to fetch server list.")
 
         csv_data = uh.read().decode('utf-8')
         reader = csv.reader(csv_data.splitlines())
@@ -334,41 +192,33 @@ class Speedtest(object):
             all_servers.append({
                 'id': row[0].strip(), 'url': row[1].strip(), 'lat': row[2].strip(),
                 'lon': row[3].strip(), 'name': row[4].strip(), 'country': row[5].strip(),
-                'sponsor': row[7].strip(), 'host': row[9].strip(), 'd': 0
+                'sponsor': row[7].strip(), 'host': row[9].strip()
             })
 
         chosen = None
-        if servers:
-            target = str(servers[0])
-            chosen = next((s for s in all_servers if s['id'] == target), None)
+        if server_id:
+            chosen = next((s for s in all_servers if s['id'] == str(server_id[0])), None)
 
         if not chosen:
             print_("\nEnter country name to filter: ", end="")
             country = sys.stdin.readline().strip().lower()
             matched = [s for s in all_servers if country in s['country'].lower()]
-            if not matched:
-                print_("No servers found.");
-                sys.exit(1)
+            if not matched: print_("No matches."); sys.exit(1)
             for s in matched:
                 print_("ID: %s | City: %s | ISP: %s" % (s['id'], s['name'], s['sponsor']))
             print_("\nEnter Server ID: ", end="")
             cid = sys.stdin.readline().strip()
             chosen = next((s for s in matched if s['id'] == cid), None)
-            if not chosen: print_("Invalid ID."); sys.exit(1)
 
-        dist = distance(self.lat_lon, (float(chosen['lat']), float(chosen['lon'])))
-        chosen['d'] = dist
-        self.servers = {dist: [chosen]}
+        if not chosen: sys.exit(1)
+
+        chosen['d'] = distance(self.lat_lon, (float(chosen['lat']), float(chosen['lon'])))
         self._best = chosen
-        return self.servers
-
-    def get_best_server(self):
-        # Already set during get_servers in this modified version
-        self.results.server = self._best
-        return self._best
+        self.results.server = chosen
+        return chosen
 
     def download(self):
-        # Use the largest available file for a sustained stream
+        # Use a large image to ensure sustained transfer on a single connection
         url = os.path.dirname(self._best['url']) + '/random4000x4000.jpg'
         thread = SustainedDownloader(build_request(url), self.config['length']['download'], self._opener)
         start = timeit.default_timer()
@@ -385,43 +235,17 @@ class Speedtest(object):
         thread.start()
         thread.join()
         stop = timeit.default_timer()
-        self.results.bytes_sent = thread.result
+        self.results.bytes_sent = thread.total_sent
         self.results.upload = (self.results.bytes_sent / (stop - start)) * 8.0
         return self.results.upload
 
-    def start_mtr(self):
-        host = self._best['host'].split(':')[0]
-        print_('Starting MTR to %s...' % host)
-        try:
-            self._mtr_process = subprocess.Popen(['mtr', '-r', '-c', '5', '-z', host],
-                                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        except:
-            self._mtr_process = None
-
-    def get_mtr_report(self):
-        if not getattr(self, '_mtr_process', None): return "MTR failed."
-        out, _ = self._mtr_process.communicate()
-        return out.decode('utf-8', 'ignore')
-
 
 class SpeedtestResults(object):
-    def __init__(self, download=0, upload=0, ping=0, server=None, client=None, secure=False):
-        self.download, self.upload, self.ping = download, upload, ping
+    def __init__(self, server=None, client=None):
+        self.download = self.upload = 0
         self.server = server or {}
         self.client = client or {}
-        self.timestamp = datetime.datetime.utcnow().isoformat() + 'Z'
         self.bytes_received = self.bytes_sent = 0
-
-    def dict(self):
-        return {'download': self.download, 'upload': self.upload, 'server': self.server, 'client': self.client}
-
-
-def build_opener():
-    opener = OpenerDirector()
-    for handler in [ProxyHandler(), HTTPDefaultErrorHandler(), HTTPRedirectHandler(), HTTPErrorProcessor()]:
-        opener.add_handler(handler)
-    opener.addheaders = [('User-agent', build_user_agent())]
-    return opener
 
 
 def shell():
@@ -430,25 +254,19 @@ def shell():
     parser.add_argument('--secure', action='store_true')
     args = parser.parse_args()
 
-    print_('Retrieving configuration...')
+    print_('Initializing sustained test...')
     st = Speedtest(secure=args.secure)
-    st.get_servers(servers=args.server)
-    st.get_best_server()
+    best = st.get_servers(server_id=args.server)
 
-    st.start_mtr()
-    res = st.results
-    print_('Hosted by %s [%.2f km]: City: %s' % (res.server['sponsor'], res.server['d'], res.server['name']))
+    print_('\nHosted by %s [%.2f km]: %s' % (best['sponsor'], best['d'], best['name']))
 
-    print_('Testing download speed (20s sustained)...')
+    print_('Testing download speed (20s sustained, single connection)...')
     st.download()
-    print_('Download: %.2f Mbit/s' % (res.download / 1e6))
+    print_('Download: %.2f Mbit/s' % (st.results.download / 1e6))
 
-    print_('Testing upload speed (20s sustained)...')
+    print_('Testing upload speed (20s sustained, single connection)...')
     st.upload()
-    print_('Upload: %.2f Mbit/s' % (res.upload / 1e6))
-
-    print_('\nWaiting for MTR report...')
-    print_('--- MTR Report ---\n%s' % st.get_mtr_report())
+    print_('Upload: %.2f Mbit/s' % (st.results.upload / 1e6))
 
 
 if __name__ == '__main__':
